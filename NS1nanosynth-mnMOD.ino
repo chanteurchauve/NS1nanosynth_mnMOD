@@ -21,6 +21,10 @@
 #define LFO_PIN 11       
 #define TRIG_PIN 12      
 
+// LFO Shape Pins (Connect to GND to select)
+#define LFO_WAVE_PIN_0 0
+#define LFO_WAVE_PIN_1 1
+
 // LFO Fraction Matrix Pins
 #define LFO_MOD1_PIN 6   
 #define LFO_MOD2_PIN 7   
@@ -45,8 +49,6 @@ int pitchBendOffset = 0;
 bool sustainActive = false;
 
 // --- PORTAMENTO (GLIDE) VARIABLES ---
-// Calculated at MOZZI_CONTROL_RATE = 256Hz
-// Steps = Target_ms * (256 / 1000)
 const int glideStepsTable[8] = {
   0,     // 000: Off
   13,    // 001: Only A0 (50ms)
@@ -59,7 +61,6 @@ const int glideStepsTable[8] = {
 };
 
 int glideCounter = 0;
-
 float currentPitchFloat = 0.0;
 float targetPitchFloat = 0.0;
 float pitchGlideStep = 0.0;
@@ -85,10 +86,10 @@ byte noteCount = 0;
 // --- MIDI TO CV CONVERSION ARRAY (PROGMEM) ---
 const uint16_t DacVal[] PROGMEM = {
   0, 69, 137, 206, 274, 343, 411, 480, 548, 617, 685, 754,                 
-  822, 891, 960, 1028, 1097, 1165, 1234, 1302, 1371, 1439, 1508, 1576,      
-  1645, 1713, 1782, 1850, 1919, 1988, 2056, 2125, 2193, 2262, 2330, 2399,   
-  2467, 2536, 2604, 2673, 2741, 2810, 2878, 2947, 3016, 3084, 3153, 3221,   
-  3290, 3358, 3427, 3495, 3564, 3632, 3701, 3769, 3838, 3907, 3975, 4044,   
+  822, 891, 960, 1028, 1097, 1165, 1234, 1302, 1371, 1439, 1508, 1576,       
+  1645, 1713, 1782, 1850, 1919, 1988, 2056, 2125, 2193, 2262, 2330, 2399,    
+  2467, 2536, 2604, 2673, 2741, 2810, 2878, 2947, 3016, 3084, 3153, 3221,    
+  3290, 3358, 3427, 3495, 3564, 3632, 3701, 3769, 3838, 3907, 3975, 4044,    
   4095, 4095 
 };
 
@@ -97,15 +98,30 @@ byte clockCounter = 0;
 unsigned long trigOffTime = 0;
 bool trigActive = false;
 
-const byte lfoTable[24] PROGMEM = {
-  128, 161, 192, 219, 240, 252, 255, 250, 236, 213, 184, 151,
-  118, 85, 54, 29, 11, 2, 0, 5, 18, 41, 70, 101
+// 256-sample Sine table for high resolution LFO. 
+const byte lfoSine256[256] PROGMEM = {
+  128, 131, 134, 137, 140, 143, 146, 149, 152, 156, 159, 162, 165, 168, 171, 174,
+  176, 179, 182, 185, 188, 191, 193, 196, 199, 201, 204, 206, 209, 211, 213, 216,
+  218, 220, 222, 224, 226, 228, 230, 232, 234, 236, 237, 239, 240, 242, 243, 245,
+  246, 247, 248, 249, 250, 251, 252, 252, 253, 254, 254, 254, 255, 255, 255, 255,
+  255, 255, 255, 255, 254, 254, 254, 253, 252, 252, 251, 250, 249, 248, 247, 246,
+  245, 243, 242, 240, 239, 237, 236, 234, 232, 230, 228, 226, 224, 222, 220, 218,
+  216, 213, 211, 209, 206, 204, 201, 199, 196, 193, 191, 188, 185, 182, 179, 176,
+  174, 171, 168, 165, 162, 159, 156, 152, 149, 146, 143, 140, 137, 134, 131, 128,
+  124, 121, 118, 115, 112, 109, 106, 103, 100, 96,  93,  90,  87,  84,  81,  78,
+  76,  73,  70,  67,  64,  61,  59,  56,  53,  51,  48,  46,  43,  41,  39,  36,
+  34,  32,  30,  28,  26,  24,  22,  20,  18,  16,  15,  13,  12,  10,  9,   7,
+  6,   5,   4,   3,   2,   1,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,
+  0,   0,   0,   0,   0,   0,   0,   0,   1,   2,   3,   4,   5,   6,   7,   9,
+  10,  12,  13,  15,  16,  18,  20,  22,  24,  26,  28,  30,  32,  34,  36,  39,
+  41,  43,  46,  48,  51,  53,  56,  59,  61,  64,  67,  70,  73,  76,  78,  81,
+  84,  87,  90,  93,  96,  100, 103, 106, 109, 112, 115, 118, 121, 124, 128
 };
 
 const byte lfoSubdivisions[8] PROGMEM = {24, 12, 48, 16, 96, 18, 36, 32}; 
 byte lfoTickCounter = 0;
 
-// --- CV INPUT CONFIGURATION (A3 -> A5) TO MIDI HOST ---
+// --- CV INPUT CONFIGURATION ---
 constexpr byte cvPins[3] = {A3, A4, A5};
 int filteredCV[3] = {0, 0, 0};
 int lastSentRaw[3] = {-999, -999, -999}; 
@@ -123,6 +139,9 @@ void setup() {
   digitalWrite(TRIG_PIN, LOW);
   pinMode(LFO_PIN, OUTPUT);
   
+  pinMode(LFO_WAVE_PIN_0, INPUT_PULLUP);
+  pinMode(LFO_WAVE_PIN_1, INPUT_PULLUP);
+
   pinMode(LFO_MOD1_PIN, INPUT_PULLUP);
   pinMode(LFO_MOD2_PIN, INPUT_PULLUP);
   pinMode(LFO_MOD3_PIN, INPUT_PULLUP);
@@ -140,7 +159,6 @@ void setup() {
 
   startMozzi();
 
-  // --- DIGITAL BUFFER RE-ENABLE FIX FOR ATMEGA32U4 ---
   #if defined(__AVR_ATmega32U4__)
     DIDR0 &= ~(_BV(ADC7D) | _BV(ADC6D) | _BV(ADC5D)); 
   #endif
@@ -272,11 +290,9 @@ void removeNote(byte pitch) {
       noteCount--;
 
       if (wasTop || noteCount == 0) {
-        // Legato Glide Back Fix: If notes are still held, glide to the newly exposed top note.
         if (noteCount > 0) {
           playTopNote(false, true); 
         } else {
-          // No notes left, shut down cleanly.
           playTopNote(false, false); 
         }
       }
@@ -302,7 +318,6 @@ void handleSustain(byte value) {
     bool topChanged = (newCount != noteCount);
     noteCount = newCount;
     if (topChanged) { 
-      // If sustain drops and exposes a lower held note, glide to it.
       if (noteCount > 0) {
           playTopNote(false, true);
       } else {
@@ -377,12 +392,36 @@ void loop() {
         byte targetTicks = pgm_read_byte_near(&lfoSubdivisions[lfoState]);
 
         if (lfoTickCounter >= targetTicks) {
-          lfoTickCounter %= targetTicks;
+          lfoTickCounter = 0;
         }
 
-        byte lfoIndex = (lfoTickCounter * 24) / targetTicks;
-        byte currentLfoVal = pgm_read_byte_near(&lfoTable[lfoIndex]);
-        analogWrite(LFO_PIN, currentLfoVal);
+        // --- HIGH RESOLUTION INDEX CALCULATION (0-255) ---
+        // Synchronized with MIDI Clock for smooth transitions
+        byte lfoIndex = ((uint16_t)lfoTickCounter * 256) / targetTicks;
+
+        // --- LFO SHAPE SELECTION LOGIC ---
+        byte p0 = digitalRead(LFO_WAVE_PIN_0); 
+        byte p1 = digitalRead(LFO_WAVE_PIN_1); 
+        byte waveState = (p1 << 1) | p0;       
+
+        byte currentLfoVal;
+        switch (waveState) {
+          case 0: // 00: Both pins to GND -> Saw Inverted
+            currentLfoVal = 255 - lfoIndex; 
+            break;
+          case 1: // 01: Pin 1 to GND -> Saw
+            currentLfoVal = lfoIndex; 
+            break;
+          case 2: // 10: Pin 0 to GND -> Pulse 50%
+            currentLfoVal = (lfoIndex < 128) ? 255 : 0; 
+            break;
+          case 3: // 11: No pins to GND -> Sine
+          default:
+            currentLfoVal = pgm_read_byte_near(&lfoSine256[lfoIndex]); 
+            break;
+        }
+        
+        analogWrite(LFO_PIN, currentLfoVal); 
         
         lfoTickCounter++;
       }

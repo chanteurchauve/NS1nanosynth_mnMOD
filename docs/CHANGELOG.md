@@ -1,3 +1,26 @@
+# Changelog
+
+All notable changes to the NS1nanosynth mnMOD firmware project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.2.0] - 2026-06-20
+
+### Added
+- **256-Sample High-Resolution LFO Engine:** Upgraded the LFO accumulator calculation from a coarse 24-step configuration to a highly fluid 256-step resolution, removing visual and auditory staircase voltage artifacts on Pin 11.
+- **Hardware Waveform Selection Matrix:** Integrated physical pin tracking via Pin 0 and Pin 1 utilizing internal pull-ups. Users can ground these pins to dynamically swap LFO wave outputs on the fly.
+- **On-The-Fly Mathematical Waveform Generation:** Implemented raw mathematical calculation formulas for Sawtooth, Inverse Sawtooth, and 50% Duty Cycle Square/Pulse waves, allowing zero-latency signal transitions based directly on accumulator position.
+
+### Changed
+- **LFO Output Consolidation:** Hardcoded LFO generation to route strictly and exclusively out of **Pin 11** across all waveform states, stabilizing board hardware infrastructure.
+- **CV Input Architecture Optimization:** Refactored CV-to-MIDI inputs down to 3 dedicated channels (**A3, A4, A5** mapping to **CC102, CC103, CC104**). This shift guarantees no hardware overlap or line-noise interference with the Portamento configuration matrix running on A0–A2.
+- **PROGMEM Layout Architecture:** Rebuilt Flash arrays to isolate the Sine wave table as the exclusive resident waveform inside PROGMEM, freeing up critical microcontroller storage resources.
+
+### Removed
+- Legacy 24-sample low-resolution arrays for structural waveforms.
+- Floating-pin scanning on pins A1 and A2 to safeguard performance glide integrity.
+
 ## [1.1.0] - 2026-06-20
 
 ### Added
