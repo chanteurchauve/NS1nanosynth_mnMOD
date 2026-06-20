@@ -1,6 +1,6 @@
 // --- MOZZI 2.0 CORE CONFIGURATION ---
 #define MOZZI_AUDIO_CHANNELS MOZZI_STEREO
-#define MOZZI_CONTROL_RATE 64
+#define MOZZI_CONTROL_RATE 256 
 
 #include <MIDIUSB.h>
 #include <SPI.h>
@@ -18,27 +18,55 @@
 #define SS_PIN 4       
 #define LDAC_PIN -1    
 #define GATE_PIN 5     
-#define LFO_PIN 11       // PWM Output for analog LFO 
-#define TRIG_PIN 12      // Digital Output for Clock to Trigger
+#define LFO_PIN 11       
+#define TRIG_PIN 12      
 
 // LFO Fraction Matrix Pins
-#define LFO_MOD1_PIN 6   // Modifier 1
-#define LFO_MOD2_PIN 7   // Modifier 2
-#define LFO_MOD3_PIN 8   // Modifier 3
+#define LFO_MOD1_PIN 6   
+#define LFO_MOD2_PIN 7   
+#define LFO_MOD3_PIN 8   
+
+// Portamento (Glide) Matrix Pins
+#define GLIDE_PIN_A0 A0
+#define GLIDE_PIN_A1 A1
+#define GLIDE_PIN_A2 A2
 
 DAC_MCP49xx dac(DAC_MCP49xx::MCP4922, SS_PIN, LDAC_PIN);
 
 // --- MOZZI DIGITAL OSCILLATORS ---
-Oscil <2048, AUDIO_RATE> aSaw1(SAW2048_DATA); // Main Oscillator (Channel L -> D9)
-Oscil <2048, AUDIO_RATE> aSaw2(SAW2048_DATA); // Sub-Oscillator -2 Octaves (Channel R -> D10)
+Oscil <2048, AUDIO_RATE> aSaw1(SAW2048_DATA); 
+Oscil <2048, AUDIO_RATE> aSaw2(SAW2048_DATA); 
 
 #define MIN_NOTE 36 
 #define MAX_NOTE 97 
 
-// --- PITCH BEND AND SUSTAIN VARIABLES ---
-int currentBaseDacA = 0;   
+// --- PITCH BEND AND SUSTAIN ---
 int pitchBendOffset = 0;   
 bool sustainActive = false;
+
+// --- PORTAMENTO (GLIDE) VARIABLES ---
+// Calculated at MOZZI_CONTROL_RATE = 256Hz
+// Steps = Target_ms * (256 / 1000)
+const int glideStepsTable[8] = {
+  0,     // 000: Off
+  13,    // 001: Only A0 (50ms)
+  26,    // 010: Only A1 (100ms)
+  128,   // 011: A0+A1   (500ms)
+  64,    // 100: Only A2 (250ms)
+  128,   // 101: A0+A2   (500ms)
+  128,   // 110: A1+A2   (500ms)
+  256    // 111: A0+A1+A2 (1000ms)
+};
+
+int glideCounter = 0;
+
+float currentPitchFloat = 0.0;
+float targetPitchFloat = 0.0;
+float pitchGlideStep = 0.0;
+
+float currentDacFloat = 0.0;
+float targetDacFloat = 0.0;
+float dacGlideStep = 0.0;
 
 // --- I2C DIGIPOT CONFIGURATION ---
 const byte digipot_addr = 0x2C;                    
@@ -69,21 +97,19 @@ byte clockCounter = 0;
 unsigned long trigOffTime = 0;
 bool trigActive = false;
 
-// 24-step LFO Table (PROGMEM)
 const byte lfoTable[24] PROGMEM = {
   128, 161, 192, 219, 240, 252, 255, 250, 236, 213, 184, 151,
   118, 85, 54, 29, 11, 2, 0, 5, 18, 41, 70, 101
 };
 
-// MIDI Ticks for LFO (PROGMEM) - States: 0=1/4, 1=1/8, 2=2/4, 3=1/8 triplets, 4=4/4, 5=dotted 1/8, 6=dotted 1/4, 7=1/4 triplets
 const byte lfoSubdivisions[8] PROGMEM = {24, 12, 48, 16, 96, 18, 36, 32}; 
 byte lfoTickCounter = 0;
 
-// --- CV INPUT CONFIGURATION (A1 -> A5) WITH DSP FILTERING ---
-constexpr byte cvPins[5] = {A1, A2, A3, A4, A5};
-int filteredCV[5] = {0, 0, 0, 0, 0};
-int lastSentRaw[5] = {-999, -999, -999, -999, -999}; 
-const int CV_NOISE_THRESHOLD = 12; // Deadband (Hysteresis) against jitter
+// --- CV INPUT CONFIGURATION (A3 -> A5) TO MIDI HOST ---
+constexpr byte cvPins[3] = {A3, A4, A5};
+int filteredCV[3] = {0, 0, 0};
+int lastSentRaw[3] = {-999, -999, -999}; 
+const int CV_NOISE_THRESHOLD = 12; 
 
 void setup() {
   dac.setGain(2);
@@ -97,13 +123,15 @@ void setup() {
   digitalWrite(TRIG_PIN, LOW);
   pinMode(LFO_PIN, OUTPUT);
   
-  // Enable internal pull-up resistors for the fraction matrix
   pinMode(LFO_MOD1_PIN, INPUT_PULLUP);
   pinMode(LFO_MOD2_PIN, INPUT_PULLUP);
   pinMode(LFO_MOD3_PIN, INPUT_PULLUP);
 
-  // Anchor CV pins to 5V to eliminate "antenna" noise when unpatched
-  for (byte i = 0; i < 5; i++) {
+  pinMode(GLIDE_PIN_A0, INPUT_PULLUP);
+  pinMode(GLIDE_PIN_A1, INPUT_PULLUP);
+  pinMode(GLIDE_PIN_A2, INPUT_PULLUP);
+
+  for (byte i = 0; i < 3; i++) {
     pinMode(cvPins[i], INPUT_PULLUP);
   }
 
@@ -111,9 +139,13 @@ void setup() {
   Wire.setClock(100000); 
 
   startMozzi();
+
+  // --- DIGITAL BUFFER RE-ENABLE FIX FOR ATMEGA32U4 ---
+  #if defined(__AVR_ATmega32U4__)
+    DIDR0 &= ~(_BV(ADC7D) | _BV(ADC6D) | _BV(ADC5D)); 
+  #endif
 }
 
-// --- I2C SUPPORT FUNCTIONS (DIGIPOT) ---
 void i2c_send(byte addr, byte reg, byte val) {
   Wire.beginTransmission(addr);
   Wire.write(reg);
@@ -128,26 +160,53 @@ void DigipotWrite(byte pot, byte val) {
   i2c_send(digipot_addr, targetAddr, val);  
 }
 
+void updatePitchAndDac() {
+  int finalDacA = constrain((int)currentDacFloat + pitchBendOffset, 0, 4095);
+  dac.outputA(finalDacA);
+
+  float finalPitch = currentPitchFloat + ((float)pitchBendOffset / 137.0f * 2.0f);
+  aSaw1.setFreq(mtof(finalPitch));
+  aSaw2.setFreq(mtof(finalPitch - 24.0f));
+}
+
+int getGlideSteps() {
+  byte a0_active = (digitalRead(GLIDE_PIN_A0) == LOW) ? 1 : 0;
+  byte a1_active = (digitalRead(GLIDE_PIN_A1) == LOW) ? 1 : 0;
+  byte a2_active = (digitalRead(GLIDE_PIN_A2) == LOW) ? 1 : 0;
+  
+  byte state = (a2_active << 2) | (a1_active << 1) | a0_active;
+  return glideStepsTable[state];
+}
+
 // --- AUDIO/GATE/PITCH GENERATION LOGIC ---
-void playTopNote() {
+void playTopNote(bool triggerEnvelope, bool enableGlide) {
   if (noteCount > 0) {
     byte pitch = noteBuffer[noteCount - 1];
     byte vel = velBuffer[noteCount - 1];
 
-    currentBaseDacA = pgm_read_word_near(&DacVal[pitch - MIN_NOTE]);
-    int finalDacA = constrain(currentBaseDacA + pitchBendOffset, 0, 4095);
-    dac.outputA(finalDacA);
-    
-    uint16_t dacB = map(vel, 0, 127, 0, 4095);
-    dac.outputB(dacB);
+    targetDacFloat = pgm_read_word_near(&DacVal[pitch - MIN_NOTE]);
+    targetPitchFloat = (float)pitch; 
 
-    float floatingPitch = (float)pitch + ((float)pitchBendOffset / 137.0f * 2.0f);
-    aSaw1.setFreq(mtof(floatingPitch));
-    aSaw2.setFreq(mtof(floatingPitch - 24.0f)); 
+    if (triggerEnvelope) {
+      uint16_t dacB = map(vel, 0, 127, 0, 4095);
+      dac.outputB(dacB);
+      digitalWrite(GATE_PIN, HIGH);
+    }
 
-    digitalWrite(GATE_PIN, HIGH);
+    int activeGlideSteps = getGlideSteps();
+
+    if (enableGlide && activeGlideSteps > 0) {
+      glideCounter = activeGlideSteps;
+      dacGlideStep = (targetDacFloat - currentDacFloat) / (float)activeGlideSteps;
+      pitchGlideStep = (targetPitchFloat - currentPitchFloat) / (float)activeGlideSteps;
+    } else {
+      glideCounter = 0;
+      currentDacFloat = targetDacFloat;
+      currentPitchFloat = targetPitchFloat;
+      updatePitchAndDac();
+    }
   } else {
-    dac.outputB(0);               
+    dac.outputB(0);                
     digitalWrite(GATE_PIN, LOW);  
   }
 }
@@ -185,7 +244,13 @@ void addNote(byte pitch, byte vel) {
       heldBuffer[MAX_NOTES - 1] = true;
     }
   }
-  playTopNote();
+  
+  bool isLegato = (noteCount > 1);
+  if (isLegato) {
+    playTopNote(false, true); 
+  } else {
+    playTopNote(true, false); 
+  }
 }
 
 void removeNote(byte pitch) {
@@ -207,7 +272,13 @@ void removeNote(byte pitch) {
       noteCount--;
 
       if (wasTop || noteCount == 0) {
-        playTopNote();
+        // Legato Glide Back Fix: If notes are still held, glide to the newly exposed top note.
+        if (noteCount > 0) {
+          playTopNote(false, true); 
+        } else {
+          // No notes left, shut down cleanly.
+          playTopNote(false, false); 
+        }
       }
     }
   }
@@ -230,29 +301,36 @@ void handleSustain(byte value) {
     }
     bool topChanged = (newCount != noteCount);
     noteCount = newCount;
-    if (topChanged) { playTopNote(); }
+    if (topChanged) { 
+      // If sustain drops and exposes a lower held note, glide to it.
+      if (noteCount > 0) {
+          playTopNote(false, true);
+      } else {
+          playTopNote(false, false); 
+      }
+    }
   }
 }
 
-// --- MOZZI CONTROL LOGIC (Control Rate) ---
+// --- MOZZI CONTROL LOGIC ---
 void updateControl() {
   bool anyMidiSent = false;
 
-  for (byte i = 0; i < 5; i++) {
-    int rawCV = mozziAnalogRead<10>(cvPins[i]);
+  if (glideCounter > 0) {
+    currentDacFloat += dacGlideStep;
+    currentPitchFloat += pitchGlideStep;
+    updatePitchAndDac();
+    glideCounter--;
+  }
 
-    // EMA Low-Pass Filter optimized via bit-shift (75% old, 25% new)
+  for (byte i = 0; i < 3; i++) {
+    int rawCV = mozziAnalogRead<10>(cvPins[i]);
     filteredCV[i] = ((filteredCV[i] * 3) + rawCV) >> 2;
 
-    // Hysteresis: check for variation exceeding noise threshold
     if (abs(filteredCV[i] - lastSentRaw[i]) >= CV_NOISE_THRESHOLD) {
       lastSentRaw[i] = filteredCV[i];
       
-      // Dynamic recalibration: map a restricted raw range (e.g., 20-1003)
-      // to the full MIDI range (0-127).
       int mappedCC = map(filteredCV[i], 20, 1003, 0, 127);
-      
-      // Mathematically ensure values are clamped to 0-127 range
       byte currentCC = constrain(mappedCC, 0, 127);
       
       byte ccNumber = 102 + i; 
@@ -267,12 +345,10 @@ void updateControl() {
   }
 }
 
-// --- MOZZI 2.0 AUDIO GENERATION ---
 StereoOutput updateAudio() {
   return StereoOutput::from8Bit(aSaw1.next(), aSaw2.next());
 }
 
-// --- MAIN LOOP ---
 void loop() {
   audioHook(); 
 
@@ -284,18 +360,15 @@ void loop() {
     if (rx.header != 0) {
       byte status = rx.byte1 & 0xF0; 
       
-      // CLOCK AND LFO SYNC MANAGEMENT
       if (rx.header == 0x0F && rx.byte1 == 0xF8) {
-        
         clockCounter++;
-        if (clockCounter >= 6) { // 16th note trigger out
+        if (clockCounter >= 6) { 
           clockCounter = 0;
           digitalWrite(TRIG_PIN, HIGH);
           trigActive = true;
           trigOffTime = millis() + 15; 
         }
 
-        // Proportional Phase LFO System 
         byte mod1 = (digitalRead(LFO_MOD1_PIN) == LOW) ? 1 : 0; 
         byte mod2 = (digitalRead(LFO_MOD2_PIN) == LOW) ? 1 : 0; 
         byte mod3 = (digitalRead(LFO_MOD3_PIN) == LOW) ? 1 : 0; 
@@ -308,38 +381,27 @@ void loop() {
         }
 
         byte lfoIndex = (lfoTickCounter * 24) / targetTicks;
-        
         byte currentLfoVal = pgm_read_byte_near(&lfoTable[lfoIndex]);
         analogWrite(LFO_PIN, currentLfoVal);
         
         lfoTickCounter++;
       }
       
-      // NOTE ON
       else if (status == 0x90 && rx.byte3 > 0) {
         if (rx.byte2 >= MIN_NOTE && rx.byte2 <= MAX_NOTE) {
           addNote(rx.byte2, rx.byte3);
         }
       }
-      // NOTE OFF
       else if (status == 0x80 || (status == 0x90 && rx.byte3 == 0)) {
         removeNote(rx.byte2);
       }
-      // PITCH BEND
       else if (status == 0xE0) {
         int pbValue = (rx.byte3 << 7) | rx.byte2; 
         pitchBendOffset = map(pbValue, 0, 16383, -137, 137);
         if (noteCount > 0) {
-          int finalDacA = constrain(currentBaseDacA + pitchBendOffset, 0, 4095);
-          dac.outputA(finalDacA);
-          
-          byte pitch = noteBuffer[noteCount - 1];
-          float floatingPitch = (float)pitch + ((float)pitchBendOffset / 137.0f * 2.0f);
-          aSaw1.setFreq(mtof(floatingPitch));
-          aSaw2.setFreq(mtof(floatingPitch - 24.0f));
+          updatePitchAndDac(); 
         }
       }
-      // CONTROL CHANGE
       else if (status == 0xB0) {
         byte ccNumber = rx.byte2;
         byte ccValue = rx.byte3;
@@ -356,13 +418,11 @@ void loop() {
     }
   } while (rx.header != 0);
 
-  // TRIGGER OUT DEACTIVATION
   if (trigActive && millis() >= trigOffTime) {
     digitalWrite(TRIG_PIN, LOW);
     trigActive = false;
   }
 
-  // DIGIPOT UPDATE
   for (byte i = 0; i < 4; i++) {
     if (potDirty[i]) {
       DigipotWrite(i, targetPotValues[i]);
