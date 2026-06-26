@@ -1,4 +1,4 @@
-# NS1nanosynth mnMOD v1.2.0
+# NS1nanosynth mnMOD v1.2.1
 
 A high-performance, feature-expanded firmware for the soundmachines NS1 Nanosynth platform, focused on high-resolution MIDI-to-CV conversion, sample-accurate synchronized modulation, hardware control matrices, and low-latency digital synthesis.
 

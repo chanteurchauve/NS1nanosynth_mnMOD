@@ -5,6 +5,12 @@ All notable changes to the NS1nanosynth mnMOD firmware project will be documente
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-06-26
+
+### Fixed
+- **V/Oct Pitch Tracking Calibration:** Partially resolved a linear scale drift causing a ~36-cent tuning drop when moving from the lowest C to the highest C across the 5-octave (60 semitones) hardware range.
+- **DAC Scaling Optimization:** Recalibrated the `DacVal` lookup table in `PROGMEM` with an increased step resolution (~68.66 per semitone) to correct the analog oscillator tracking. High-register capping is documented at 4095 due to the physical 12-bit ceiling of the MCP4922 DAC.
+
 ## [1.2.0] - 2026-06-20
 
 ### Added
